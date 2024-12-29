@@ -5,15 +5,17 @@ import bibtexparser
 import re
 import hashlib
 
+
 def select_files():
     files = filedialog.askopenfilenames(filetypes=[("BibTeX files", "*.bib;*.bibtex")])
     file_paths.set("\n".join(files))
 
-def clean_key(key, used_keys):
-    if not key:
-        key = 'unknown'
+
+def clean_title_as_key(title, used_keys):
+    if not title:
+        title = 'unknown'
     # 替换非法字符为下划线
-    cleaned_key = re.sub(r'[^a-zA-Z0-9_]', '_', key)
+    cleaned_key = re.sub(r'[^a-zA-Z0-9_]', '_', title)
     cleaned_key = re.sub(r'_+', '_', cleaned_key)
     cleaned_key = cleaned_key[:30]  # 限制长度
     if cleaned_key and cleaned_key[0].isdigit():
@@ -26,32 +28,27 @@ def clean_key(key, used_keys):
     used_keys.add(cleaned_key)
     return cleaned_key
 
+
 def generate_unique_identifier(entry):
     # 生成条目的唯一标识符
     fields = ''.join(f"{key}{str(value if value is not None else '').lower().replace(' ', '')}"
                      for key, value in sorted(entry.items()))
     return hashlib.sha256(fields.encode()).hexdigest()
 
+
 def process_entries(entries):
     processed = {}
     duplicates = {}
-    cleaned_keys = {}
-    used_keys = set()
     for entry in entries:
-        original_key = entry.get('ID', '')
-        entry['ID'] = clean_key(original_key, used_keys)  # 清理键值
-        if entry['ID'] != original_key:
-            cleaned_keys[original_key] = entry['ID']
         identifier = generate_unique_identifier(entry)
         if identifier in processed:
-            if identifier not in duplicates:
-                duplicates[identifier] = []
-            duplicates[identifier].append(entry['ID'])
+            duplicates.setdefault(identifier, []).append(entry['ID'])
         else:
             processed[identifier] = entry
     new_entries = list(processed.values())
     duplicate_ids = [ids for ids_list in duplicates.values() for ids in ids_list]
-    return new_entries, duplicate_ids, cleaned_keys
+    return new_entries, duplicate_ids
+
 
 def merge_bib():
     selected_files = file_paths.get().split('\n')
@@ -67,7 +64,10 @@ def merge_bib():
         if not overwrite:
             messagebox.showinfo("提示", "操作取消。")
             return
-    entries = []
+
+    global_used_keys = set()
+    all_entries = []
+
     for file in selected_files:
         print(f"Processing file: {file}")
         try:
@@ -75,32 +75,42 @@ def merge_bib():
                 parser = bibtexparser.bparser.BibTexParser(common_strings=True, ignore_nonstandard_types=False)
                 bib_database = bibtexparser.load(bibtex_file, parser=parser)
                 print(f"Read {len(bib_database.entries)} entries from {file}")
-                entries.extend(bib_database.entries)
+
+                # 修改键值为 title 的内容，并确保全局唯一
+                for entry in bib_database.entries:
+                    title = entry.get('title', 'unknown')
+                    cleaned_key = clean_title_as_key(title, global_used_keys)
+                    entry['ID'] = cleaned_key
+
+                all_entries.extend(bib_database.entries)
+
         except UnicodeDecodeError:
             try:
                 with open(file, 'r', encoding='gbk') as bibtex_file:
                     parser = bibtexparser.bparser.BibTexParser(common_strings=True, ignore_nonstandard_types=False)
                     bib_database = bibtexparser.load(bibtex_file, parser=parser)
                     print(f"Read {len(bib_database.entries)} entries from {file}")
-                    entries.extend(bib_database.entries)
+
+                    # 修改键值为 title 的内容，并确保全局唯一
+                    for entry in bib_database.entries:
+                        title = entry.get('title', 'unknown')
+                        cleaned_key = clean_title_as_key(title, global_used_keys)
+                        entry['ID'] = cleaned_key
+
+                    all_entries.extend(bib_database.entries)
+
             except Exception as e:
                 messagebox.showerror("错误", f"读取文件 {file} 时出错：{str(e)}")
                 return
         except Exception as e:
             messagebox.showerror("错误", f"读取文件 {file} 时出错：{str(e)}")
             return
-    print(f"Total entries read: {len(entries)}")
+    print(f"Total entries read: {len(all_entries)}")
 
-    # 处理条目，清理键值
-    new_entries, duplicate_ids, cleaned_keys = process_entries(entries)
+    # 处理条目，去重
+    new_entries, duplicate_ids = process_entries(all_entries)
     print(f"Processed entries: {len(new_entries)}")
     print(f"Duplicates removed: {len(duplicate_ids)}")
-
-    # 打印清理后的键值
-    if cleaned_keys:
-        print("以下键值被清理并替换为合法键值：")
-        for original, cleaned in cleaned_keys.items():
-            print(f"{original} -> {cleaned}")
 
     # 保存合并后的文件
     new_bib_database = bibtexparser.bibdatabase.BibDatabase()
@@ -115,11 +125,6 @@ def merge_bib():
     # 显示处理结果
     file_paths.set("")
     messages = []
-    if cleaned_keys:
-        msg = "以下键值被清理并替换为合法键值：\n"
-        for original, cleaned in cleaned_keys.items():
-            msg += f"{original} -> {cleaned}\n"
-        messages.append(msg)
     if duplicate_ids:
         msg = "以下键值重复，已被移除：\n"
         msg += "\n".join(duplicate_ids)
@@ -127,13 +132,15 @@ def merge_bib():
     if messages:
         messagebox.showinfo("处理结果", "\n\n".join(messages))
     else:
-        messagebox.showinfo("合并完成", "BibTeX文件合并完成，没有重复键值且所有键值合法。")
+        messagebox.showinfo("合并完成", "BibTeX文件合并完成，没有重复条目。")
+
 
 # 创建 GUI
 root = tk.Tk()
 root.title("BibTeX文件合并工具")
 
-intro_label = tk.Label(root, text="本工具用于合并多个BibTeX文件，并自动清理和去重条目。", wraplength=400, justify="center")
+intro_label = tk.Label(root, text="本工具用于合并多个BibTeX文件，并自动清理和去重条目。", wraplength=400,
+                       justify="center")
 intro_label.pack(pady=10)
 
 file_frame = tk.Frame(root)
